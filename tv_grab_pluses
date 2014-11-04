@@ -1,0 +1,162 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Copyright 2014 Oscar Curero
+This code is free software; you can redistribute it and/or modify it
+under the terms of the GPL 3 license (see the file
+COPYING.txt included with the distribution).
+"""
+
+from __future__ import print_function
+from ConfigParser import ConfigParser
+from datetime import datetime, timedelta
+import getopt
+import os
+import time
+import uuid
+import sys
+import xmltv
+import libmhw
+
+def usage():
+    print("""tv_grab_pluses usage:\t
+    --description: This grabber\t
+    --capabilities: show capabilities\t
+    --quiet: supress informational messages, show only errors\t
+    --output: write data to file\t
+    --days: fetch data for X days\t
+    --offset: fetch data for X days in future\t
+    --configure: configure parameters\t
+    --config-file: parameters file for configure tv_grab_pluses (default: /etc/tv_grab_pluses.conf)\t
+    -h,--help: Show this help""")
+
+def configure(config_file):
+    config_device =  "/dev/dvb/adapter0/demux0"
+    print("File where configuration will be written: [%s] " % (config_file,), end='')
+    default_file = raw_input()
+    print("DVB device: [ %s ] " % (config_device,), end='')
+    default_device = raw_input()
+    if default_file == "":
+        default_file = config_file
+    if default_device == "":
+        default_device = config_device
+    config = ConfigParser()
+    config.add_section("General")
+    config.set("General", "device", default_device)
+    with open(default_file, 'wb') as configfile:
+        config.write(configfile)
+   
+def main():
+    # Safe defaults
+    no_info = False
+    maxdays = 30
+    offset = -1
+    config_file = "/etc/tv_grab_pluses.conf"
+    output_file = "/tmp/" + str(uuid.uuid4())
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "h", ["help", "description", "capabilities", "quiet" ,\
+        "output=", "days=", "offset=", "config-file=", "configure"])
+    except getopt.GetoptError, err:
+        # print help information and exit:
+        #print str(err) # will print something like "option -a not recognized"
+        usage()
+        sys.exit(2)
+    for o, a in opts:
+        if o in ("--description"):
+          print("tv_grab_pluses is a MHWv2 grabber for plus.es")
+          sys.exit()
+        elif o in ("--capabilities"):
+          print("baseline")
+          sys.exit()
+        elif o in ("--quiet"):
+          no_info = True
+        elif o in ("--output"):
+          output_file = a
+          new_file = True
+        elif o in ("--days"):
+          maxdays = int(a)
+        elif o in ("--offset"):
+          offset = int(a)
+        elif o in ("--configure"):
+          configure(config_file)
+          sys.exit()
+        elif o in ("--config-file"):
+          config_file = a
+        elif o in ("-h", "--help"):
+          usage()
+          sys.exit()
+    upperdate = datetime.now() + timedelta(offset) + timedelta(maxdays)
+    lowerdate = datetime.now() + timedelta(offset)
+    print("INFO: Programs between %s and %s will be written" % (str(lowerdate), str(upperdate)))
+    # No more BS, let's have some fun :)
+    config = ConfigParser()
+    config.read(config_file)
+    try:   
+        device = config.get("General", "device")
+    except:
+        print("ERROR: configuration file not found or syntax invalid", file=sys.stderr)
+        sys.exit(2)
+    if no_info == False:
+        print("INFO: Fetching data from device %s" % (device,))
+    # Get the data!
+    data = libmhw.MHW(device)
+    try:
+        data.scan_stream()
+    except libmhw.NoMHWStreamFoundError:
+        print("ERROR: No EPG data found on the current tune", file=sys.stderr)
+        sys.exit(3)
+    if no_info == False: 
+        print("INFO: Processing data (found %d programmes)" % (len(data.programs)))
+    # Process data
+    xmlfile = xmltv.Writer(date = str(datetime.today()), source_info_url = "http://www.plus.es")
+    #channel_count = 1
+    channels = []
+    channelid_list = {}
+    filtered_channels = []
+    # Filter programmes (maxdays and offset)
+    for program in data.programs:
+            # If the program is within the limits of maxdays and offset, add it to the list
+            if program.airtime <= datetime.now() + timedelta(offset) + timedelta(maxdays) and\
+            program.airtime >= datetime.now() + timedelta(offset):
+                filtered_channels.append(program)
+                if program.channel not in channels:
+                    # New channel detected, add it to the list
+                    channels.append(program.channel)
+            else:
+                pass
+  
+    # Read channels and build their channelID, add them to xmltv
+    for channel in channels:
+            channel_id = "tv." + str(data.channels.index(channel) + 1) + "-" + channel.replace(" ", "_") + ".plus.es"
+            channelid_list[channel] = channel_id
+            xmlfile.addChannel({"id": channel_id, "display-name": [(channel, "es")]})
+            #channel_count += 1
+    if no_info == False:
+        print("INFO: %d channels written" % (len(channels),))
+        
+    # Read channels and add them to xmltv
+    if time.localtime().tm_isdst == 1:
+        gmt_offset = "+0200"
+    else:
+        gmt_offset = "+0100"
+    for program in filtered_channels:
+        data={}
+        data["title"] = [(program.title, "")]
+        data["category"] = [(program.category, 'es'), (program.subcategory, 'es')]
+        data["length"] = {"units": "minutes", "length": str(program.length)}
+        data["channel"] = channelid_list[program.channel]
+        data["start"] = program.airtime.strftime("%Y%m%d%H%M") + " " + gmt_offset
+        data["desc"] = [(program.summary, '')]
+        xmlfile.addProgramme(data)
+    if no_info == False:
+        print("INFO: %d programmes written" % (len(filtered_channels),))
+        
+    xmlfile.write(output_file)
+    if not locals().has_key("new_file"):
+        print(open(output_file, "r").read())
+        os.remove(output_file)
+    
+if __name__ == "__main__":
+    # Run tv_grab_pluses
+    main()
+
